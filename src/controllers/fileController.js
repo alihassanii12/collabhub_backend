@@ -1,13 +1,20 @@
 const multer = require('multer');
 const path = require('path');
 const db = require('../config/database');
+const cloudinary = require('cloudinary').v2;
 
-const storage = multer.diskStorage({
-  destination: './uploads/',
-  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } }).single('file');
+const storage = multer.memoryStorage();
+const upload = multer({ 
+  storage, 
+  limits: { fileSize: 100 * 1024 * 1024 } 
+}).single('file');
 
 const uploadFile = async (req, res) => {
   upload(req, res, async (err) => {
@@ -15,8 +22,34 @@ const uploadFile = async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     
     const { team_id } = req.body;
-    const result = await db.query('INSERT INTO files (team_id, uploaded_by, file_url, file_name, file_type, file_size) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *', [team_id, req.user.id, '/uploads/' + req.file.filename, req.file.originalname, req.file.mimetype, req.file.size]);
-    res.status(201).json(result.rows[0]);
+    
+    try {
+      // Upload to Cloudinary
+      const result = await new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          {
+            folder: 'collabhub',
+            resource_type: 'auto',
+          },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          }
+        );
+        uploadStream.end(req.file.buffer);
+      });
+      
+      // Save to database
+      const dbResult = await db.query(
+        'INSERT INTO files (team_id, uploaded_by, file_url, file_name, file_type, file_size) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+        [team_id, req.user.id, result.secure_url, req.file.originalname, req.file.mimetype, req.file.size]
+      );
+      
+      res.status(201).json(dbResult.rows[0]);
+    } catch (error) {
+      console.error('Upload error:', error);
+      res.status(500).json({ error: 'Failed to upload file' });
+    }
   });
 };
 
